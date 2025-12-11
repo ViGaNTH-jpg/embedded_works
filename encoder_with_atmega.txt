@@ -1,0 +1,170 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+
+volatile long encoderCount = 0;
+volatile int8_t encoderDir = 0;
+
+long setpoint = 0;
+const long POSITION_TOLERANCE = 5;
+const uint8_t Kp = 3;
+const uint8_t PWM_MAX = 255;
+
+void motorStop(void);
+void motorForward(void);
+void motorBackward(void);
+void setPWM(uint8_t duty);
+long getEncoderCount(void);
+void readSetpointFromSerial(void);
+
+void setup(void)
+{
+  cli();
+
+  DDRD &= ~((1 << DDD2) | (1 << DDD3));
+  PORTD |= (1 << PORTD2) | (1 << PORTD3);
+
+  DDRD |= (1 << DDD7);
+  DDRB |= (1 << DDB0) | (1 << DDB1);
+
+  motorStop();
+  setPWM(0);
+
+  EICRA |= (1 << ISC01) | (1 << ISC00);
+  EIMSK |= (1 << INT0);
+  EIFR  |= (1 << INTF0);
+
+  TCCR1A = 0;
+  TCCR1B = 0;
+
+  TCCR1A |= (1 << WGM10);
+  TCCR1B |= (1 << WGM12);
+
+  TCCR1A |= (1 << COM1A1);
+  TCCR1B |= (1 << CS11);
+
+  OCR1A = 0;
+
+  Serial.begin(9600);
+  Serial.println("Inicio - Control de posicion con encoder");
+  Serial.println("Escribe un numero de cuentas y presiona Enter.");
+
+  sei();
+}
+
+void loop(void)
+{
+  readSetpointFromSerial();
+
+  long posicion = getEncoderCount();
+  long error = setpoint - posicion;
+  long absError = (error >= 0) ? error : -error;
+
+  if (absError <= POSITION_TOLERANCE)
+  {
+    motorStop();
+    setPWM(0);
+  }
+  else
+  {
+    if (error > 0)
+    {
+      motorForward();
+    }
+    else
+    {
+      motorBackward();
+    }
+
+    uint32_t pwm = (uint32_t)absError * Kp;
+    if (pwm > PWM_MAX)
+    {
+      pwm = PWM_MAX;
+    }
+    setPWM((uint8_t)pwm);
+  }
+
+  Serial.print("Posicion: ");
+  Serial.print(posicion);
+  Serial.print("  Setpoint: ");
+  Serial.println(setpoint);
+}
+
+ISR(INT0_vect)
+{
+  if (PIND & (1 << PIND3))
+  {
+    encoderCount++;
+    encoderDir = 1;
+  }
+  else
+  {
+    encoderCount--;
+    encoderDir = -1;
+  }
+}
+
+void motorStop(void)
+{
+  PORTD &= ~(1 << PORTD7);
+  PORTB &= ~(1 << PORTB0);
+}
+
+void motorForward(void)
+{
+  PORTD |= (1 << PORTD7);
+  PORTB &= ~(1 << PORTB0);
+}
+
+void motorBackward(void)
+{
+  PORTD &= ~(1 << PORTD7);
+  PORTB |= (1 << PORTB0);
+}
+
+void setPWM(uint8_t duty)
+{
+  OCR1A = duty;
+}
+
+long getEncoderCount(void)
+{
+  long value;
+  uint8_t sreg = SREG;
+  cli();
+  value = encoderCount;
+  SREG = sreg;
+  return value;
+}
+
+void readSetpointFromSerial(void)
+{
+  static char buffer[16];
+  static uint8_t index = 0;
+
+  while (Serial.available() > 0)
+  {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r')
+    {
+      if (index > 0)
+      {
+        buffer[index] = '\0';
+        long value = atol(buffer);
+        setpoint = value;
+        index = 0;
+
+        Serial.print("Nuevo setpoint: ");
+        Serial.println(setpoint);
+      }
+    }
+    else
+    {
+      if (index < sizeof(buffer) - 1)
+      {
+        buffer[index++] = c;
+      }
+    }
+  }
+}
+
